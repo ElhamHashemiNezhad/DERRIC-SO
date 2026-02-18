@@ -1,3 +1,4 @@
+import csv
 import os
 
 import numpy as np
@@ -26,6 +27,7 @@ class ControllerAgent:
         self,
         env,
         controller_id,
+        controller_policy,
         seed=None,
         max_power_per_bs: float = 43.0,  # dBm (≈20 W)
         target_pdr: float = 0.95,
@@ -37,6 +39,7 @@ class ControllerAgent:
         self.max_power_per_bs = float(max_power_per_bs)
         self.target_pdr = float(target_pdr)
         self.base_stations = self.env.base_stations
+        self.controller_policy = controller_policy
 
 
     # ----------------------- OBSERVATION -----------------------
@@ -97,18 +100,24 @@ class ControllerAgent:
 
             # ---- Latency: normalize [0..200] ms → [-1,1]
             lat = float(udata.get("latency_ms", 0.0))
+            print(f"latency {bs_id}, {user_id}, {lat}")
             lat = np.clip(lat, 0.0, 200.0)
             lat_norm = 2.0 * (lat / 200.0) - 1.0
+            print(f"norm latency {bs_id}, {user_id}, {lat_norm}")
 
             # ---- SNR: normalize [-10..40] dB → [-1,1]
             snr = float(udata.get("sinr", -10.0))
+            print(f"snr {bs_id}, {user_id}, {snr}")
             snr = np.clip(snr, -10.0, 40.0)
             snr_norm = 2.0 * ((snr + 10.0) / 50.0) - 1.0
+            print(f"snr_norm {bs_id}, {user_id}, {snr_norm}")
 
             # ---- Capacity: normalize [0..1Gbps] → [-1,1]
             cap = float(udata.get("capacity", 0.0))
-            cap = np.clip(cap, 0.0, 1e9)
-            cap_norm = 2.0 * (cap / 1e9) - 1.0
+            print(f"capacity {bs_id}, {user_id}, {cap}")
+            cap = np.clip(cap, 0.0, 3e9)
+            cap_norm = 2.0 * (cap / 3e9) - 1.0
+            print(f"cap_norm {bs_id}, {user_id}, {cap_norm}")
 
             # ---- Current power: normalize [0..43 dBm] → [-1,1]
             p_dbm = 0.0
@@ -117,7 +126,9 @@ class ControllerAgent:
                 if not np.isfinite(p_dbm):
                     p_dbm = 0.0
             p_dbm = np.clip(p_dbm, 0.0, 43.0)
+            print(f"p_dbm {bs_id}, {user_id}, {p_dbm}")
             pwr_norm = 2.0 * (p_dbm / 43.0) - 1.0
+            print(f"pwr_norm {bs_id}, {user_id}, {pwr_norm}")
 
             features.extend([lat_norm, snr_norm, cap_norm, pwr_norm])
 
@@ -203,7 +214,9 @@ class ControllerAgent:
             # Update environment with per-user power (in dBm)
             self.env.user_power_allocation.setdefault(bs_id, {})
             for u, p_lin in zip(users, alloc_linear):
-                power_dbm = 10 * np.log10(p_lin) if p_lin > 0.0 else -np.inf
+                EPS = 1e-12
+                p_lin_safe = max(p_lin, EPS)
+                power_dbm = 10 * np.log10(p_lin_safe)
                 self.env.user_power_allocation[bs_id][u] = power_dbm
 
             self.env.base_stations[bs_id].recompute_connected_users_metrics()
@@ -226,6 +239,7 @@ class ControllerAgent:
             df.to_csv(log_file, mode="a", header=write_header, index=False)
         except Exception as e:
             print(f"[WARNING] Power log failed: {e}")
+        print(f"[WARNING] Power {self.env.user_power_allocation}")
 
         return self.env.user_power_allocation
 
@@ -250,33 +264,52 @@ class ControllerAgent:
                 count += 1
 
         avg_pdr = (total_pdr / count) if count > 0 else 0.0
+        print(f"[INFO] avg pdr is {avg_pdr}")
 
-        # Scale to [0, 10] for PPO stability and interpretability
-        return 10.0 * avg_pdr
+        return  10 * avg_pdr
 
     def calculate_packet_delivery_ratio(
             self,
             bs_id: int,
             user_id: int,
-            target_capacity: float = 5e6,  # 5 Mbps
+            alpha_d: float = 0.001,  # distance sensitivity
+            alpha_n: float = 0.05,  # load sensitivity
     ) -> float:
         """
-        Monotonic PDR model:
-            PDR = capacity / (capacity + target_capacity)
+        PDR model:
 
-        - capacity in bps
-        - target_capacity is the "half-saturation" point.
+            PDR = exp( - (alpha_d * distance + alpha_n * N_c) )
+
+        - distance: UE–BS distance (meters)
+        - N_c: number of users managed by the same controller
+
+        This keeps PDR in a reasonable range without assuming a hard max distance.
         """
-        bs = self.env.base_stations.get(bs_id)
-        if bs is None or user_id not in bs.connected_users:
-            return 0.0
+        bs = self.env.base_stations[bs_id]
+        ue_pos = bs.connected_users[user_id].get("position")
+        bs_pos = bs.get_status().get("position")
 
-        cap = float(bs.connected_users[user_id].get("capacity", 0.0))
-        if cap <= 0.0:
-            return 0.0
+        distance = np.linalg.norm(np.array(ue_pos) - np.array(bs_pos))
 
-        pdr = cap / (cap + target_capacity)
-        return float(np.clip(pdr, 0.0, 1.0))
+        ctrl_id = self.env.base_station_assignments[bs_id]
+
+        # All BSs handled by this controller
+        bs_list = [
+            bs for bs, c in self.env.base_station_assignments.items()
+            if c == ctrl_id
+        ]
+
+        # Number of users managed by this controller
+        N_c = len(bs.connected_users)
+
+        tx_power_dBm = self.env.user_power_allocation.get(bs_id, {}).get(user_id, 0.0)
+        tx_power_linear = 10 ** (tx_power_dBm / 10.0)
+        k=0.1
+        # Smooth PDR: decays with distance and load, but not insanely fast
+        pdr = np.exp(-(alpha_d * distance + alpha_n * N_c)) * (1 - np.exp(-k * tx_power_linear))
+
+        print(f"[INFO] pdr is {pdr}")
+        return pdr
 
     # ----------------------- DIAGNOSTIC -----------------------
 
@@ -289,5 +322,7 @@ class ControllerAgent:
                     if p is not None and np.isfinite(p):
                         powers.append(float(p))
         return float(np.mean(powers)) if powers else 0.0
+
+
 
 
