@@ -1,18 +1,18 @@
 # DERRIC-SO 
 ## Reinforced Fairness-Aware Multi-Agent Self-Organization for 6G Radio Access Network Orchestration
 
-**DERRIC-SO** is a research framework for self-organization orchestration through Multi-Agent Reinforcement Learning (MARL) in heterogeneous 6G network environments which is the extension of DERRIC.
+**DERRIC-SO** is a research framework for **self-organization orchestration** through Multi-Agent Reinforcement Learning (MARL) in heterogeneous 6G network environments which is the extension of DERRIC.
 
-The framework addresses the placement of distributed RAN controllers across heterogeneous infrastructure nodes while jointly optimizing:
+The framework addresses the organization of decentralized orchestration without requiring centralized coordination across heterogeneous infrastructure nodes while jointly optimizing:
 
-- End-to-end controller–user latency  
-- User transmission power consumption  
-- Packet Delivery Ratio (PDR)
+- User throughput  
+- Global fairness index  
+- Local fairness index
 
-DERRIC models a fully decentralized multi-agent system composed of:
+DERRIC-SO models a fully decentralized multi-agent system composed of:
 
-- **Orchestrator agents** that learn optimal placement of distributed RAN controllers.
-- **Controller agents** that regulate UE transmission power within their domains.
+- **Orchestrator agents** that each agent organizes itself autonomously through Duplication, Termination and Relocation or Stay.
+
 
 Learning is performed using **Proximal Policy Optimization (PPO)** implemented with Ray RLlib.
 
@@ -23,14 +23,13 @@ The environment is dynamic, scalable, and mobility-aware, simulating realistic 6
 ## 🚀 Core Features
 
 - Fully decentralized Multi-Agent Reinforcement Learning (MARL)
-- Independent learning at two agent types:
-  - Orchestrator agents (controller placement)
-  - Controller agents (power control)
+- Centralized Training and Decentralized Execution (CTDE)
+- Parallel learning through independet agents
+- Jain Fairness Index for user throughput
 - Dynamic number of agents
 - Proximal Policy Optimization (PPO) for policy learning
 - Mobility-aware UE modeling
 - SINR computation based on Free-Space Path Loss
-- Transmission power control for UEs
 - GEANT-v2 topology with 34 infrastructure nodes
 - Implemented using:
   - Ray RLlib (MARL training)
@@ -40,7 +39,7 @@ The environment is dynamic, scalable, and mobility-aware, simulating realistic 6
 
 ## 🧠 System Overview
 
-DERRIC models a distributed 6G RAN system consisting of:
+DERRIC-SO models a distributed 6G RAN system consisting of:
 
 - Infrastructure nodes with heterogeneous capacities
 - DEcentralized orchestration
@@ -49,7 +48,7 @@ DERRIC models a distributed 6G RAN system consisting of:
 - User Equipments (UEs)
 
 
-Orchestrator agents decide controller placement over the network graph, while controller agents manage transmission power of UEs connected to base stations.
+Orchestrator agents decide orchestrator placement over the network graph in order to increasing user throughput and fairness.
 
 The system operates under dynamic user mobility and evolving network conditions.
 
@@ -70,6 +69,8 @@ DERRIC/
 ├── agents/
 │   ├── orchestrator.py
 │   └── controller.py
+│
+├── pymobility/
 │
 ├── results/
 │
@@ -118,9 +119,12 @@ Voronoi-based domain partitioning for orchestrator regions based on spatial plac
 ### agents/
 
 **orchestrator.py**  
-Learns controller placement policy to reduce:
-- User–controller latency  
-- Controller–orchestrator latency  
+- Learns orchestrator placement policy to increase:
+  - User throughput  
+  - Jain Fairness Index  
+- Learns controller placement policy to reduce:
+  - User–controller latency  
+  - Controller–orchestrator latency  
 
 **controller.py**  
 Learns transmission power allocation policy to improve:
@@ -157,6 +161,6 @@ python main.py
 
 If you use this framework in your research, please cite:
 
-**DERRIC: Decentralized Reinforced RAN Intelligent Controller Orchestration for 6G Networks**  
-IEEE Wireless Communications and Networking Conference (WCNC), 2025  
-DOI: https://doi.org/10.1109/WCNC61545.2025.10978840
+**Reinforced Fairness-Aware Multi-Agent Self-Organization for 6G Radio Access Network Orchestration**  
+IEEE 50th Conference on Local Computer Networks (LCN), 2025  
+DOI: https://doi.org/10.1109/LCN65610.2025.11146320
