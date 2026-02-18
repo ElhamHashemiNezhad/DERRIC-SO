@@ -42,7 +42,7 @@ The environment is dynamic, scalable, and mobility-aware, simulating realistic 6
 DERRIC-SO models a distributed 6G RAN system consisting of:
 
 - Infrastructure nodes with heterogeneous capacities
-- DEcentralized orchestration
+- Decentralized orchestration
 - Distributed RAN controllers
 - Base Stations
 - User Equipments (UEs)
