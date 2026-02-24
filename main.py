@@ -80,7 +80,7 @@ def main():
         "num_hosts": 34,
         "num_orchestrators": 2,
         "num_controllers": 4,
-        "num_users": 50,
+        "num_users": 200,
         "num_base_stations": 15,
         "seed": env_seed,
         "num_iterations": num_iterations,
@@ -141,8 +141,8 @@ def main():
         .training(
             lr=0.0001,
             entropy_coeff=0.01,
-            train_batch_size=140,
-            sgd_minibatch_size=64,
+            train_batch_size=64,
+            sgd_minibatch_size=8,
             num_sgd_iter=10,
             clip_param=0.2,
             vf_loss_coeff=0.5,
@@ -150,8 +150,8 @@ def main():
             use_gae=True,
         )
         .rollouts(
-            num_rollout_workers=7,
-            rollout_fragment_length=20,
+            num_rollout_workers=1,
+            rollout_fragment_length=64,
         )
         .framework("torch")
         .debugging(log_level="INFO")
