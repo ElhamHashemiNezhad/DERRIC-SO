@@ -1,20 +1,8 @@
-import csv
 import os
-
 import numpy as np
-import networkx as nx
 import pandas as pd
+import torch
 
-import copy
-from envs.networktopology import create_geant_topology
-
-
-def _numeric_id_key(cid: str, big: int = 10**9) -> int:
-    """Sort helper: 'ctrl_10' > 'ctrl_2' numerically, fallback big for weird ids."""
-    try:
-        return int(cid.split("_")[1])
-    except Exception:
-        return big
 
 
 class ControllerAgent:
@@ -41,6 +29,20 @@ class ControllerAgent:
         self.base_stations = self.env.base_stations
         self.controller_policy = controller_policy
 
+    def act(self, obs):
+        # use RLlib controller policy to compute actions
+        return self.controller_policy.compute_single_action(obs)
+
+    def get_weights(self):
+        state = self.controller_policy.model.state_dict()
+        return [v.detach().cpu().numpy() for v in state.values()]
+
+    def set_weights(self, weights):
+        state = self.controller_policy.model.state_dict()
+        new_state = {}
+        for (k, old_v), new_v in zip(state.items(), weights):
+            new_state[k] = torch.tensor(new_v, dtype=old_v.dtype, device=old_v.device)
+        self.controller_policy.model.load_state_dict(new_state)
 
     # ----------------------- OBSERVATION -----------------------
 
@@ -100,24 +102,17 @@ class ControllerAgent:
 
             # ---- Latency: normalize [0..200] ms → [-1,1]
             lat = float(udata.get("latency_ms", 0.0))
-            print(f"latency {bs_id}, {user_id}, {lat}")
             lat = np.clip(lat, 0.0, 200.0)
             lat_norm = 2.0 * (lat / 200.0) - 1.0
-            print(f"norm latency {bs_id}, {user_id}, {lat_norm}")
-
             # ---- SNR: normalize [-10..40] dB → [-1,1]
             snr = float(udata.get("sinr", -10.0))
-            print(f"snr {bs_id}, {user_id}, {snr}")
             snr = np.clip(snr, -10.0, 40.0)
             snr_norm = 2.0 * ((snr + 10.0) / 50.0) - 1.0
-            print(f"snr_norm {bs_id}, {user_id}, {snr_norm}")
 
             # ---- Capacity: normalize [0..1Gbps] → [-1,1]
             cap = float(udata.get("capacity", 0.0))
-            print(f"capacity {bs_id}, {user_id}, {cap}")
-            cap = np.clip(cap, 0.0, 3e9)
-            cap_norm = 2.0 * (cap / 3e9) - 1.0
-            print(f"cap_norm {bs_id}, {user_id}, {cap_norm}")
+            cap = np.clip(cap, 0.0, 1e9)
+            cap_norm = 2.0 * (cap / 1e9) - 1.0
 
             # ---- Current power: normalize [0..43 dBm] → [-1,1]
             p_dbm = 0.0
@@ -126,9 +121,7 @@ class ControllerAgent:
                 if not np.isfinite(p_dbm):
                     p_dbm = 0.0
             p_dbm = np.clip(p_dbm, 0.0, 43.0)
-            print(f"p_dbm {bs_id}, {user_id}, {p_dbm}")
             pwr_norm = 2.0 * (p_dbm / 43.0) - 1.0
-            print(f"pwr_norm {bs_id}, {user_id}, {pwr_norm}")
 
             features.extend([lat_norm, snr_norm, cap_norm, pwr_norm])
 
@@ -150,7 +143,6 @@ class ControllerAgent:
         Each user's power is proportional to its action value, and total BS power
         does not exceed the BS's maximum transmit power (default 43 dBm).
         """
-
         # --- Flatten and sanitize the action input ---
         if isinstance(action, dict) and len(action) == 1:
             action = next(iter(action.values()))
@@ -165,7 +157,6 @@ class ControllerAgent:
         bs_list = sorted(self.env._get_controller_to_bs_mapping().get(self.controller_id, []))
         pairs = []
         per_bs_users = {bs_id: [] for bs_id in bs_list}
-
         for bs_id in bs_list:
             bs = self.env.base_stations[bs_id]
             users = sorted(bs.connected_users.keys())
@@ -214,9 +205,7 @@ class ControllerAgent:
             # Update environment with per-user power (in dBm)
             self.env.user_power_allocation.setdefault(bs_id, {})
             for u, p_lin in zip(users, alloc_linear):
-                EPS = 1e-12
-                p_lin_safe = max(p_lin, EPS)
-                power_dbm = 10 * np.log10(p_lin_safe)
+                power_dbm = 10 * np.log10(p_lin) if p_lin > 0.0 else -np.inf
                 self.env.user_power_allocation[bs_id][u] = power_dbm
 
             self.env.base_stations[bs_id].recompute_connected_users_metrics()
@@ -232,14 +221,12 @@ class ControllerAgent:
                         "user_id": user_id,
                         "power_dBm": p_dbm
                     })
-
             df = pd.DataFrame(records)
             log_file = os.path.join(self.env.output_dir, f"user_power_log_{self.controller_id}.csv")
             write_header = not os.path.exists(log_file)
             df.to_csv(log_file, mode="a", header=write_header, index=False)
         except Exception as e:
             print(f"[WARNING] Power log failed: {e}")
-        print(f"[WARNING] Power {self.env.user_power_allocation}")
 
         return self.env.user_power_allocation
 
@@ -264,9 +251,8 @@ class ControllerAgent:
                 count += 1
 
         avg_pdr = (total_pdr / count) if count > 0 else 0.0
-        print(f"[INFO] avg pdr is {avg_pdr}")
 
-        return  10 * avg_pdr
+        return 10 * avg_pdr
 
     def calculate_packet_delivery_ratio(
             self,
@@ -304,11 +290,10 @@ class ControllerAgent:
 
         tx_power_dBm = self.env.user_power_allocation.get(bs_id, {}).get(user_id, 0.0)
         tx_power_linear = 10 ** (tx_power_dBm / 10.0)
-        k=0.1
+        k = 0.1
         # Smooth PDR: decays with distance and load, but not insanely fast
         pdr = np.exp(-(alpha_d * distance + alpha_n * N_c)) * (1 - np.exp(-k * tx_power_linear))
 
-        print(f"[INFO] pdr is {pdr}")
         return pdr
 
     # ----------------------- DIAGNOSTIC -----------------------
@@ -322,7 +307,5 @@ class ControllerAgent:
                     if p is not None and np.isfinite(p):
                         powers.append(float(p))
         return float(np.mean(powers)) if powers else 0.0
-
-
 
 
