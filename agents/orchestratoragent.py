@@ -4,8 +4,6 @@ import networkx as nx
 from envs.networktopology import create_geant_topology
 
 
-
-
 class OrchestratorAgent:
     """
     Agent responsible for orchestrator actions and controller management in a distributed network.
@@ -20,6 +18,10 @@ class OrchestratorAgent:
         self.env = env
         self.seed = seed
         self.mobility_manager = env.mobility_manager
+        self.env.ctrl_to_orch_latency = {}
+        self.env.controller_avg_latency = {}
+        self.orchcont_policy = None
+
     # ---------------------------------------------------------------------
     # Orchestrator observation (for orch_* agents)
     # ---------------------------------------------------------------------
@@ -31,7 +33,6 @@ class OrchestratorAgent:
           - controller counts (own + others, normalized)
           - normalized users belonging to this orchestrator
           - avg end-to-end latency (user→BS→orchestrator), normalized
-        NOTE: This reads *current* env state and does not mutate it.
         """
         # Build topology (heavy; keep if acceptable)
         G, _ = create_geant_topology(self.env.num_hosts)
@@ -147,105 +148,110 @@ class OrchestratorAgent:
     # Orch-controller observation (for orchcont_* agents)
     # ---------------------------------------------------------------------
     def _get_controller_observation(self, agent_id: str) -> np.ndarray:
-        """
-        Observation for the controller-management policy living at an orchestrator.
-        Layout:
-          - own controller count (normalized)
-          - other orchestrators' controller counts (padded)
-          - per-controller user counts (padded to 26)
-          - per-controller avg user latency (padded to 26)
-          - per-controller controller→orchestrator latency (padded to 26)
-        """
-        # Map "orchcont_X" -> "orch_X"
-        orch_id = agent_id.replace("orchcont", "orch")
+        index = int(agent_id.split("_")[-1])
+        orch_ids = sorted(self.env.orchestrator_host_indices.keys())
+
+        if index >= len(orch_ids):
+            index = 0  # fallback
+
+        orch_id = orch_ids[index]
 
         G, _ = create_geant_topology(self.env.num_hosts)
         obs = []
 
-        # Other orchestrators
+        # -------------------------------
+        # 1) Own + other orchestrator counts
+        # -------------------------------
         other_orchs = [oid for oid in sorted(self.env.orchestrator_agents) if oid != orch_id]
         max_orch = len(self.env.orchestrator_host_indices)
 
-        # 1) Own controller count
+        # Own controller count
         own_ctrls = [c for c, o in self.env.controller_assignments.items() if o == orch_id]
-        obs.append(np.clip(len(own_ctrls) / max(1, self.env.num_controllers), -1, 1))
+        obs.append(float(len(own_ctrls)))
 
-        # 2) Other orchestrators' controller counts
+        # Other orchestrators
         for i in range(max_orch - 1):
             if i < len(other_orchs):
                 oid = other_orchs[i]
                 ctrls = [c for c, o in self.env.controller_assignments.items() if o == oid]
-                obs.append(np.clip(len(ctrls) / max(1, self.env.num_controllers), -1, 1))
+                obs.append(float(len(ctrls)))
             else:
                 obs.append(0.0)
 
-        # 3) Per-controller user counts (max 26)
+        # -------------------------------
+        # 2) Controllers actually deployed
+        # -------------------------------
+        all_ctrl_ids = sorted(
+            c for c in self.env.controller_assignments.keys()
+            if c in self.env.controller_host_indices
+        )[:26]
+
+        # -------------------------------
+        # 3) User count per controller
+        # -------------------------------
         user_bs_map = dict(self.env.user_bs_assignments)
         ctrl_to_bs = self.env._get_controller_to_bs_mapping()
-        ctrl_user_counts = {ctrl: 0 for ctrl in self.env.controller_positions.keys()}
+
+        ctrl_user_counts = {c: 0 for c in all_ctrl_ids}
 
         for _, bs in user_bs_map.items():
-            for ctrl_id, bs_list in ctrl_to_bs.items():
-                if bs in bs_list:
+            for ctrl_id in all_ctrl_ids:
+                if bs in ctrl_to_bs.get(ctrl_id, []):
                     ctrl_user_counts[ctrl_id] += 1
                     break
 
-        # Deterministic order + cap to 26
-        all_ctrl_ids = sorted(ctrl_user_counts.keys())[:26]
         for ctrl_id in all_ctrl_ids:
-            obs.append(np.clip(ctrl_user_counts[ctrl_id] / max(1, self.env.num_users), -1, 1))
+            obs.append(float(ctrl_user_counts[ctrl_id]))
 
-
-        # 4) Per-controller avg user latency (max 26)
-        per_ctrl_lat = []
+        # -------------------------------
+        # 4) Per-controller avg user latency
+        # -------------------------------
         for ctrl_id in all_ctrl_ids:
             bs_list = ctrl_to_bs.get(ctrl_id, [])
-            ctrl_host = self.env.controller_host_indices.get(ctrl_id)
-            if ctrl_host is None:
-                per_ctrl_lat.append(1.0)
-                continue
+            ctrl_host = self.env.controller_host_indices[ctrl_id]
 
             total_ms, cnt = 0.0, 0
             for user, bs in user_bs_map.items():
                 if bs not in bs_list:
                     continue
-                try:
-                    path1 = nx.shortest_path(G, source=user, target=bs, weight="latency_ms")
-                    l1 = sum(G[path1[i]][path1[i + 1]]["latency_ms"] for i in range(len(path1) - 1)) + self.env.user_plane_latency
 
-                    path2 = nx.shortest_path(G, source=bs, target=ctrl_host, weight="latency_ms")
-                    l2 = sum(G[path2[i]][path2[i + 1]]["latency_ms"] for i in range(len(path2) - 1))
+                path1 = nx.shortest_path(G, source=user, target=bs, weight="latency_ms")
+                l1 = sum(G[path1[i]][path1[i + 1]]["latency_ms"] for i in range(len(path1) - 1))
+                l1 += self.env.user_plane_latency
 
-                    total_ms += (l1 + l2)
-                    cnt += 1
-                except Exception:
-                    continue
+                path2 = nx.shortest_path(G, source=bs, target=ctrl_host, weight="latency_ms")
+                l2 = sum(G[path2[i]][path2[i + 1]]["latency_ms"] for i in range(len(path2) - 1))
 
-            avg_ms = (total_ms / cnt) if cnt > 0 else 1000.0
-            per_ctrl_lat.append(np.clip((avg_ms / 1000.0), -1, 1))
+                total_ms += l1 + l2
+                cnt += 1
 
-        # 5) Controller → Orchestrator latencies (max 26)
-        ctrl_to_orch_lat = []
-        orch_host_idx = self.env.orchestrator_host_indices.get(orch_id)  # FIX: key by orch_id
+            avg_lat = total_ms / max(1, cnt)
+
+            self.env.controller_avg_latency[ctrl_id] = avg_lat
+
+            # Add to observation
+            obs.append(avg_lat)
+
+        # -------------------------------
+        # 5) Controller → Orchestrator latencies
+        # -------------------------------
+        orch_host_idx = self.env.orchestrator_host_indices[orch_id]
+
         for ctrl_id in all_ctrl_ids:
-            ctrl_host = self.env.controller_host_indices.get(ctrl_id)
-            if ctrl_host is None or orch_host_idx is None:
-                ctrl_to_orch_lat.append(1.0)
-                continue
-            try:
-                path = nx.shortest_path(G, source=ctrl_host, target=orch_host_idx, weight="latency_ms")
-                lat = sum(G[path[i]][path[i + 1]]["latency_ms"] for i in range(len(path) - 1)) + self.env.control_plane_latency
-                ctrl_to_orch_lat.append(np.clip(lat / 1000.0, -1, 1))
-            except Exception:
-                ctrl_to_orch_lat.append(1.0)
+            ctrl_host = self.env.controller_host_indices[ctrl_id]
 
+            path = nx.shortest_path(G, source=ctrl_host, target=orch_host_idx, weight="latency_ms")
+            lat = sum(G[path[i]][path[i + 1]]["latency_ms"] for i in range(len(path) - 1))
+            lat += self.env.control_plane_latency
+
+            self.env.ctrl_to_orch_latency[ctrl_id] = lat
+            obs.append(lat)
+
+        # -------------------------------
+        # 6) Pad observation
+        # -------------------------------
         MAX_OBS_LEN = 84
-
-        if len(obs) < MAX_OBS_LEN:
-            obs.extend([0.0] * (MAX_OBS_LEN - len(obs)))
-        elif len(obs) > MAX_OBS_LEN:
-            obs = obs[:MAX_OBS_LEN]
-
+        obs = obs[:MAX_OBS_LEN] + [0.0] * max(0, MAX_OBS_LEN - len(obs))
 
         return np.asarray(obs, dtype=np.float32)
 
@@ -272,23 +278,29 @@ class OrchestratorAgent:
             if action == 0:
                 active = [oid for oid, pos in self.env.orchestrator_positions.items()
                           if not np.array_equal(pos, [-1, -1])]
+
+                # Ensure at least 2 remain
                 if len(active) > 2:
+                    # Mark orchestrator as inactive
                     self.env.orchestrator_positions[agent_id] = np.array([-1, -1])
 
-                    # Reassign controllers from terminated orch
+                    # Redistribute its controllers
                     self._reassign_controllers_on_termination(agent_id)
 
-                    # Remove agents
+                    # Build paired IDs
+                    orchcont_id = agent_id.replace("orch_", "orchcont_")
+
+                    # Remove orchestrator agent
                     self.env.orchestrator_agents.discard(agent_id)
                     self.env.orchestrator_agent_instances.pop(agent_id, None)
 
-                    # Paired orchcont
-                    orchcont_id = agent_id.replace("orch", "orchcont")
-
+                    # Remove orchcont agent (FL level 1)
                     self.env.orchcont_agents.discard(orchcont_id)
-                    self.env.orchestrator_agent_instances.pop(orchcont_id, None)
+                    self.env.orchcont_agent_instances.pop(orchcont_id, None)
 
+                    # Update count
                     self.env.num_orchestrators = len(self.env.orchestrator_agents)
+
 
             # --- move ---
             elif 1 <= action <= num_hosts:
@@ -305,34 +317,40 @@ class OrchestratorAgent:
 
             # --- duplicate ---
             elif num_hosts < action <= 2 * num_hosts:
+
                 logical_id = allowed_host_indices[action - num_hosts - 1]
                 array_idx = logical_to_array_idx[logical_id]
                 target = self.env.orchestrator_hosts[array_idx].copy()
 
-                # skip if target host is already occupied
+                # skip if target already occupied
                 occupied = any(np.array_equal(target, pos)
                                for pos in self.env.orchestrator_positions.values()
                                if not np.array_equal(pos, [-1, -1]))
                 if occupied:
                     continue
 
-                # keep under limits
+                # ensure limits
                 if len(self.env.orchestrator_agents) < num_hosts and \
                         len(self.env.orchestrator_agents) < len(self.env.controller_agents):
-
-                    # create ID based on logical host index
+                    # build IDs
                     new_orch = f"orch_{logical_id}"
                     new_orchcont = f"orchcont_{logical_id}"
 
-
-                    # assign position and add agents
+                    # add to positions & agent registries
                     self.env.orchestrator_positions[new_orch] = target
+
                     self.env.orchestrator_agents.add(new_orch)
                     self.env.orchcont_agents.add(new_orchcont)
 
-                    # instantiate paired agents
+                    # instantiate ORCHESTRATOR agent
                     self.env.orchestrator_agent_instances[new_orch] = OrchestratorAgent(self.env)
-                    self.env.orchestrator_agent_instances[new_orchcont] = OrchestratorAgent(self.env)
+
+                    # instantiate ORCHCONT agent (LEVEL-1 FL)
+                    self.env.orchcont_agent_instances[new_orchcont] = OrchestratorAgent(
+                        self.env,
+                    )
+
+                    # update count
                     self.env.num_orchestrators = len(self.env.orchestrator_agents)
 
         # After all actions: update domains and assignments
@@ -408,6 +426,7 @@ class OrchestratorAgent:
                             self.env._update_base_station_metrics()
                             self.env._initialize_power_allocation()
 
+
     # ---------------------------------------------------------------------
     # Helpers
     # ---------------------------------------------------------------------
@@ -434,17 +453,8 @@ class OrchestratorAgent:
             self.env.controller_assignments[ctrl_id] = closest
 
     # ---------------------------------------------------------------------
-    # Rewards (delegated to env metrics; kept here for symmetry)
+    # Rewards
     # ---------------------------------------------------------------------
-    def calculate_reward(self, agent_id: str) -> float:
-        """
-        Delegates to specialized reward calculators based on agent type.
-        """
-        if agent_id in self.env.orchestrator_agents:
-            return self._calculate_orchestrator_reward(agent_id)
-        if agent_id in self.env.orchcont_agents:
-            return self._calculate_controller_reward(agent_id)
-        return 0.0
 
     def _calculate_orchestrator_reward(self, agent_id: str) -> float:
         """
@@ -485,69 +495,32 @@ class OrchestratorAgent:
 
     def _calculate_controller_reward(self, agent_id: str) -> float:
         """
-        Reward for controller placement policy at an orchestrator:
-          - mean( user→BS + BS→controller latency ) [high is bad]
-          - mean( controller→orchestrator latency ) [high is bad]
+        Reward for controller placement policy:
+          - penalize high user→BS→controller latency
+          - penalize high controller→orchestrator latency
         """
         orch_id = agent_id.replace("orchcont", "orch")
-        # Ensure last_actions dictionary exists
-        if not hasattr(self.env, "last_actions"):
-            self.env.last_actions = {}
 
-        if np.array_equal(self.env.orchestrator_positions.get(orch_id, np.array([-1, -1])), [-1, -1]):
-            return 0.0
+        # If orchestrator not placed, huge penalty
+        if np.array_equal(
+                self.env.orchestrator_positions.get(orch_id, np.array([-1, -1])),
+                [-1, -1]
+        ):
+            return -100.0
 
-        own_ctrls = [c for c, o in self.env.controller_assignments.items() if o == orch_id]
-        G, _ = create_geant_topology(self.env.num_hosts)
+        # Extract float values
+        u_lat_list = list(self.env.controller_avg_latency.values())
+        co_lat_list = list(self.env.ctrl_to_orch_latency.values())
 
-        own_bs = [bs for bs, c in self.env.base_station_assignments.items() if c in own_ctrls]
-        user_bs_map = dict(self.env.user_bs_assignments)
+        # Handle empty lists safely
+        u_lat_norm = np.mean(u_lat_list) if u_lat_list else 0.0
+        co_lat_norm = np.mean(co_lat_list) if co_lat_list else 0.0
 
-        # 1) User-Controller latencies
-        u_lat_rewards = []
-        min_lat = nx.get_edge_attributes(G, "latency_ms").values()
-        min_lat, max_lat = min(min_lat), max(min_lat)
-        for user_id, bs_id in user_bs_map.items():
-            if bs_id not in own_bs:
-                continue
-            ctrl_id = self.env.base_station_assignments.get(bs_id)
-            ctrl_host = self.env.controller_host_indices.get(ctrl_id)
-            if ctrl_host is None:
-                continue
-            try:
-                p1 = nx.shortest_path(G, source=user_id, target=bs_id, weight="latency_ms")
-                l1 = sum(G[p1[i]][p1[i + 1]]["latency_ms"] for i in range(len(p1) - 1)) + self.env.user_plane_latency
-                p2 = nx.shortest_path(G, source=bs_id, target=ctrl_host, weight="latency_ms")
-                l2 = sum(G[p2[i]][p2[i + 1]]["latency_ms"] for i in range(len(p2) - 1))
-                total = l1 + l2
-                u_lat_rewards.append(total)
-            except Exception:
-                u_lat_rewards.append(0.0)
 
-        # 2) Controller-Orchestrator latencies
-        co_lat_rewards = []
-        orch_host = self.env.orchestrator_host_indices.get(orch_id)
-        if orch_host is not None:
-            for ctrl_id in own_ctrls:
-                ctrl_host = self.env.controller_host_indices.get(ctrl_id)
-                if ctrl_host is None:
-                    co_lat_rewards.append(0.0)
-                    continue
-                try:
-                    p = nx.shortest_path(G, source=ctrl_host, target=orch_host, weight="latency_ms")
-                    lat = sum(G[p[i]][p[i + 1]]["latency_ms"] for i in range(len(p) - 1)) + self.env.control_plane_latency
-                    co_lat_rewards.append(lat)
-                except Exception:
-                    co_lat_rewards.append(0.0)
-
-        # Weighted combination
-        mean_u = float(np.mean(u_lat_rewards)) if u_lat_rewards else 0.0
-        mean_co = float(np.mean(co_lat_rewards)) if co_lat_rewards else 0.0
-        max_latency = 150
-
-        reward = 1.0 - ((0.8 * mean_u + 0.2 * mean_co) / max_latency)
+        reward = 1000 - (0.8 * u_lat_norm + 0.2 * co_lat_norm)
 
         return reward
+
 
 
 
