@@ -1,6 +1,7 @@
 import csv
 import os
-
+from envs.networktopology import create_geant_topology
+import networkx as nx
 import numpy as np
 
 
@@ -15,7 +16,7 @@ class BaseStation:
         env,
         station_id,
         position,
-        max_users=20,
+        max_users=50,
         bandwidth=200e6,     # Hz
         num_prbs=546,
         max_transmit_power=43.0, # dBm
@@ -55,50 +56,18 @@ class BaseStation:
         # Interference (list of dicts: {bs_id, position, transmit_power_dBm})
         self.interference_sources = []
 
-    # ---------- Control plane helpers ----------
-
-    #def update_control_plane_metrics(self, controller_pos, orchestrator_pos):
-        #"""Update distances/latency and adjust orchestration efficiency a bit."""
-        #controller_pos = np.asarray(controller_pos, dtype=float)
-        #orchestrator_pos = np.asarray(orchestrator_pos, dtype=float)
-
-        #self.nearest_controller_distance = float(np.linalg.norm(self.position - controller_pos))
-        #self.nearest_orchestrator_distance = float(np.linalg.norm(self.position - orchestrator_pos))
-
-        # Toy latency model (ms)
-        #self.control_plane_latency = 0.1 * (
-            #self.nearest_controller_distance + self.nearest_orchestrator_distance
-        #)
-
-        # Efficiency decays with distance to ctrl/orch (bounded)
-        #max_distance = 1000.0
-        #combined = self.nearest_controller_distance + self.nearest_orchestrator_distance
-        #distance_factor = max(0.5, 1.0 - combined / (2.0 * max_distance))
-        #self.orchestration_efficiency = min(1.5, max(0.75, 1.5 * distance_factor))
-
-    #def set_orchestration_efficiency(self, efficiency_factor):
-        #self.orchestration_efficiency = float(efficiency_factor)
-
     def assign_to_controller(self, controller_id):
         self.controller_id = controller_id
         return True
 
     # ---------- User attach/detach ----------
-
     def connect_user(self, user_id, position, velocity):
         """
         Connect (or update) a user if coverage & RBs allow.
         Idempotent: re-connecting same user updates stats without double-counting RBs.
         """
-        if not isinstance(self.connected_users, dict):
-            raise TypeError("BaseStation.connected_users must be a dict. Initialize with {} in __init__.")
-
         position = np.asarray(position, dtype=float)
         distance = float(np.linalg.norm(position - self.position))
-
-        # Coverage guard
-        if distance > self.coverage_radius:
-            return False
 
         # Capacity guard (only for *new* users)
         if user_id not in self.connected_users and len(self.connected_users) >= self.max_users:
@@ -125,13 +94,17 @@ class BaseStation:
                 return False
             self.allocated_resource_blocks += req_rbs
 
+        latency_ms = float(self.env.user_latency_map.get(user_id, float("inf")))
+        latency_ms = np.clip(latency_ms, 0.0, 200.0)
+
         self.connected_users[user_id] = {
             "position": position,
             "distance": distance,
-            "velocity": float(velocity),
+            "velocity": velocity,
             "sinr": sinr_dB,
             "capacity": user_capacity,
             "allocated_rbs": req_rbs,
+            "latency_ms": latency_ms,
         }
         # --- CSV Logging ---
         out_dir = getattr(self.env, "output_dir", "./outputs")
@@ -143,7 +116,7 @@ class BaseStation:
             writer = csv.DictWriter(f, fieldnames=[
                 "station_id", "user_id",
                 "distance_m", "velocity_mps",
-                "sinr_dB", "capacity_Mbps", "allocated_rbs"
+                "sinr_dB", "capacity_Mbps", "allocated_rbs", "latency_ms"
             ])
             if not file_exists:
                 writer.writeheader()
@@ -155,24 +128,11 @@ class BaseStation:
                 "velocity_mps": velocity,
                 "sinr_dB": sinr_dB,
                 "capacity_Mbps": user_capacity / 1e6,
-                "allocated_rbs": req_rbs
+                "allocated_rbs": req_rbs,
+                "latency_ms": latency_ms,
             })
 
         return True
-
-    def disconnect_user(self, user_id):
-        """Disconnect user and free their RBs (safe if not present)."""
-        u = self.connected_users.pop(user_id, None)
-        if not u:
-            return False
-        freed = int(u.get("allocated_rbs", 0))
-        self.allocated_resource_blocks = max(0, self.allocated_resource_blocks - freed)
-        return True
-
-    def clear_connections(self):
-        """Clear all user connections (use at episode reset)."""
-        self.connected_users.clear()
-        self.allocated_resource_blocks = 0
 
     # ---------- RF / capacity ----------
 
@@ -253,7 +213,6 @@ class BaseStation:
     def calculate_user_capacity_shannon(self, sinr_dB, allocated_bandwidth=None):
         """
         Shannon capacity (bps) with modulation & orchestration efficiency factors.
-        If bandwidth not provided, use equal share across connected users.
         """
         sinr_linear = 10 ** (sinr_dB / 10.0)
         sinr_linear = float(np.clip(sinr_linear, 1e-10, 1e12))
@@ -288,7 +247,6 @@ class BaseStation:
         return float(self.calculate_total_capacity() / len(self.connected_users))
 
     # ---------- Interference bookkeeping ----------
-
     def add_interference_source(self, bs_id, position, transmit_power_dBm):
         """Register another BS as an interference source (with range limit)."""
         if bs_id == self.station_id:
@@ -303,7 +261,6 @@ class BaseStation:
         })
 
     # ---------- Status helpers ----------
-
     def enforce_throughput_cap(self, global_target_mbps):
         """
         Cap per-user throughput if this BS is far above target (very rough fairness tool).
@@ -323,7 +280,8 @@ class BaseStation:
         self.allocated_resource_blocks = int(sum(u["allocated_rbs"] for u in self.connected_users.values()))
 
     def get_status(self):
-        util = (self.allocated_resource_blocks / self.available_resource_blocks) if self.available_resource_blocks > 0 else 0.0
+        util = (
+                    self.allocated_resource_blocks / self.available_resource_blocks) if self.available_resource_blocks > 0 else 0.0
         return {
             "station_id": self.station_id,
             "position": self.position.tolist(),
@@ -334,7 +292,7 @@ class BaseStation:
             "capacity_per_user_mbps": self.calculate_per_user_capacity() / 1e6,
             "resource_utilization": util,
             "max_users": self.max_users,
-            "orchestration_efficiency": self.orchestration_efficiency,
+            "orchestration_efficiency": self.env._calculate_orchestration_efficiency,
         }
 
     def get_user_info(self, user_id):
