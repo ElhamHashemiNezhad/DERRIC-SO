@@ -13,7 +13,7 @@ logger = logging.getLogger("mobility_simulation")
 
 
 class UserMobilityManager:
-    def __init__(self, num_users, dimensions=(100, 100),
+    def __init__(self, num_users, dimensions=(5000, 5000),
                  min_v=0.1, max_v=1.0, max_wait=100.0, draw=True,
                  calculate_contacts=False, contact_range=1.0, seed=None):
         """
@@ -35,22 +35,6 @@ class UserMobilityManager:
         self.velocities = np.zeros((self.num_users, 2))
         self.timestep = 1.0
 
-        # Plot initialization
-        if self.draw:
-            import matplotlib.pyplot as plt
-            plt.ion()
-            self.fig, self.ax = plt.subplots()
-            self.line, = self.ax.plot(range(int(self.dimensions[0])),
-                                      range(int(self.dimensions[1])),
-                                      linestyle='', marker='.')
-            if self.calculate_contacts:
-                for _ in range(100):
-                    self.ax.plot([], [], 'b-')
-            self.ax.set_xlim(0, self.dimensions[0])
-            self.ax.set_ylim(0, self.dimensions[1])
-            self.ax.set_title("Node Mobility Simulation")
-            self.ax.set_xlabel("X position")
-            self.ax.set_ylabel("Y position")
 
     def initialize_model(self):
         """
@@ -147,6 +131,13 @@ class UserMobilityManager:
 #     from usermobility import UserMobilityManager
 #
 #     plt.rcParams["font.family"] = "Times New Roman"
+#     plt.rcParams['mathtext.fontset'] = 'stix'
+#     plt.rcParams['mathtext.rm'] = 'Times New Roman'
+#     plt.rcParams['axes.titlesize'] = 16
+#     plt.rcParams['axes.labelsize'] = 16
+#     plt.rcParams['legend.fontsize'] = 16
+#     plt.rcParams['xtick.labelsize'] = 16
+#     plt.rcParams['ytick.labelsize'] = 16
 #     manager = UserMobilityManager(
 #         num_users=10,
 #         dimensions=(1000, 1000),
@@ -155,7 +146,8 @@ class UserMobilityManager:
 #         max_wait=100.0,
 #         draw=False,
 #         calculate_contacts=False,
-#         contact_range=1.0
+#         contact_range=1.0,
+#         seed=None
 #     )
 #
 #     manager.initialize_model()
@@ -170,7 +162,7 @@ class UserMobilityManager:
 #     trajectories = np.array(trajectories)  # shape: (time_steps, num_users, 2)
 #
 #     # ---- Plot final user movement paths ----
-#     plt.figure(figsize=(8, 8))
+#     plt.figure(figsize=(8.8, 6.5))
 #     num_users = trajectories.shape[1]
 #     for u in range(num_users):
 #         plt.plot(
@@ -179,7 +171,7 @@ class UserMobilityManager:
 #             linestyle='--',
 #             linewidth=2,
 #             alpha=0.8,
-#             label=f'User {u+1}'
+#             label=f"$u_{{{u+1}}}$"
 #         )
 #         # Start point (green)
 #         plt.scatter(
@@ -202,7 +194,6 @@ class UserMobilityManager:
 #
 #     plt.xlabel("X position [m]")
 #     plt.ylabel("Y position [m]")
-#     plt.title(f"User Mobility Paths ({num_steps} steps, 1 s per step)")
 #     plt.grid(True, linestyle='--', alpha=0.5)
 #     plt.legend()
 #     plt.show()
