@@ -9,7 +9,7 @@ from .usermobility import UserMobilityManager
 np.random.seed(42)
 
 
-def create_geant_topology(num_hosts=34, num_users=300):
+def create_geant_topology(num_hosts=34, num_users=500):
     """Create the GEANT network topology with mobile users."""
     G = nx.Graph()
 
@@ -213,13 +213,13 @@ def map_users_to_base_stations(mobility_manager, base_station_positions, max_ran
     return user_connections, scaled_user_positions
 
 
-def visualize_network_with_mobile_users(num_users=300, show_animation=False):
+def visualize_network_with_mobile_users(num_users=500):
     """
     Visualize the GEANT topology with mobile users.
     """
     # Create network and mobility manager
     G, link_props = create_geant_topology(num_users=num_users)
-    mobility_manager = UserMobilityManager(num_users=num_users, dimensions=(1000, 1000))
+    mobility_manager = UserMobilityManager(num_users=num_users, dimensions=(5000, 5000))
 
     # Get infrastructure positions
     pos = get_geant_positions()
@@ -296,14 +296,14 @@ def create_static_visualization(G, pos, mobility_manager, base_station_positions
 
     # Draw infrastructure nodes
     nx.draw_networkx_nodes(G, pos, nodelist=orchestrator_nodes,
-                           node_color='#0066CC', node_size=1200, label='Orchestrator')
+                           node_color='#0066CC', node_size=1500, label='Orchestrator')
     nx.draw_networkx_nodes(G, pos, nodelist=controller_nodes,
-                           node_color='#FF9900', node_size=1200, label='Controller')
+                           node_color='#FF9900', node_size=1500, label='Controller')
     nx.draw_networkx_nodes(G, pos, nodelist=base_station_nodes,
-                           node_color='#669900', node_size=1000,
+                           node_color='#669900', node_size=1500,
                            node_shape='^', label='Base Station')
     nx.draw_networkx_nodes(G, pos, nodelist=host_nodes,
-                           node_color='#CCCCCC', node_size=1200, label='Host')
+                           node_color='#CCCCCC', node_size=1500, label='Host')
 
 
     # Draw users
@@ -331,7 +331,7 @@ def create_static_visualization(G, pos, mobility_manager, base_station_positions
     for node, (x, y) in pos.items():
         if node in country_names:
             plt.text(x, y, f"{node}\n{country_names[node]}",
-                     fontsize=8, ha='center', va='center',
+                     fontsize=14, ha='center', va='center',
                      bbox=dict(boxstyle="round,pad=0.2", facecolor='white', alpha=0.7))
 
 
@@ -350,6 +350,7 @@ def create_static_visualization(G, pos, mobility_manager, base_station_positions
     import matplotlib.lines as mlines
     import matplotlib.patches as mpatches
 
+    plt.rcParams['font.family'] = 'Times New Roman'
     # --- Custom legend handles ---
     backbone_line = mlines.Line2D([], [], color='black', linewidth=3, label='Backbone (100 Gbps)')
     regional_line = mlines.Line2D([], [], color='purple', linewidth=2, label='Regional (50 Gbps)')
@@ -367,13 +368,13 @@ def create_static_visualization(G, pos, mobility_manager, base_station_positions
     ax.legend(handles=handles,
               loc='lower left',
               bbox_to_anchor=(0, 0.06),
-              fontsize=14,
+              fontsize=20,
               frameon=True,
               fancybox=True,
               framealpha=0.9,
               handlelength=2.5,
               markerscale=0.6,
-              title_fontsize=10)
+              title_fontsize=20)
 
     #plt.figtext(0.87, 0.02, stats, fontsize=11,
                 #bbox=dict(facecolor='white', alpha=0.8))
@@ -387,14 +388,14 @@ def create_static_visualization(G, pos, mobility_manager, base_station_positions
 
 
 # Main execution
-#if __name__ == "__main__":
-    #np.random.seed(42)
-
-    #print("Creating network visualization with mobile users...")
-
-    #Static visualization
-    #G, mobility_manager, connections = visualize_network_with_mobile_users(
-        #num_users=100, show_animation=False
-    #)
-
-    #print(f"Network created with {len(connections)} mobile users")
+# if __name__ == "__main__":
+#     np.random.seed(42)
+#
+#     print("Creating network visualization with mobile users...")
+#
+#     #Static visualization
+#     G, mobility_manager, connections = visualize_network_with_mobile_users(
+#         num_users=500
+#     )
+#
+#     print(f"Network created with {len(connections)} mobile users")
