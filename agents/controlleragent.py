@@ -1,8 +1,6 @@
 import os
 import numpy as np
 import pandas as pd
-import torch
-
 
 
 class ControllerAgent:
@@ -29,23 +27,8 @@ class ControllerAgent:
         self.base_stations = self.env.base_stations
         self.controller_policy = controller_policy
 
-    def act(self, obs):
-        # use RLlib controller policy to compute actions
-        return self.controller_policy.compute_single_action(obs)
-
-    def get_weights(self):
-        state = self.controller_policy.model.state_dict()
-        return [v.detach().cpu().numpy() for v in state.values()]
-
-    def set_weights(self, weights):
-        state = self.controller_policy.model.state_dict()
-        new_state = {}
-        for (k, old_v), new_v in zip(state.items(), weights):
-            new_state[k] = torch.tensor(new_v, dtype=old_v.dtype, device=old_v.device)
-        self.controller_policy.model.load_state_dict(new_state)
 
     # ----------------------- OBSERVATION -----------------------
-
     def _get_power_observation(self, agent_id):
         """
         Local observation for controller-side power RL.
@@ -104,6 +87,7 @@ class ControllerAgent:
             lat = float(udata.get("latency_ms", 0.0))
             lat = np.clip(lat, 0.0, 200.0)
             lat_norm = 2.0 * (lat / 200.0) - 1.0
+
             # ---- SNR: normalize [-10..40] dB → [-1,1]
             snr = float(udata.get("sinr", -10.0))
             snr = np.clip(snr, -10.0, 40.0)
@@ -136,13 +120,13 @@ class ControllerAgent:
         return np.array(features, dtype=np.float32)
 
         # ----------------------- ACTION -----------------------
-
     def power_allocation_action(self, action):
         """
         Allocate per-user transmit power based on the agent's action values.
         Each user's power is proportional to its action value, and total BS power
         does not exceed the BS's maximum transmit power (default 43 dBm).
         """
+
         # --- Flatten and sanitize the action input ---
         if isinstance(action, dict) and len(action) == 1:
             action = next(iter(action.values()))
@@ -157,6 +141,7 @@ class ControllerAgent:
         bs_list = sorted(self.env._get_controller_to_bs_mapping().get(self.controller_id, []))
         pairs = []
         per_bs_users = {bs_id: [] for bs_id in bs_list}
+
         for bs_id in bs_list:
             bs = self.env.base_stations[bs_id]
             users = sorted(bs.connected_users.keys())
@@ -221,6 +206,7 @@ class ControllerAgent:
                         "user_id": user_id,
                         "power_dBm": p_dbm
                     })
+
             df = pd.DataFrame(records)
             log_file = os.path.join(self.env.output_dir, f"user_power_log_{self.controller_id}.csv")
             write_header = not os.path.exists(log_file)
@@ -231,7 +217,6 @@ class ControllerAgent:
         return self.env.user_power_allocation
 
     # ----------------------- REWARD -----------------------
-
     def calculate_reward(self, agent_id: str):
         """
         Reward = 10 × average PDR over users of BSs managed by this controller.
@@ -251,8 +236,7 @@ class ControllerAgent:
                 count += 1
 
         avg_pdr = (total_pdr / count) if count > 0 else 0.0
-
-        return 10 * avg_pdr
+        return  10 * avg_pdr
 
     def calculate_packet_delivery_ratio(
             self,
@@ -290,14 +274,12 @@ class ControllerAgent:
 
         tx_power_dBm = self.env.user_power_allocation.get(bs_id, {}).get(user_id, 0.0)
         tx_power_linear = 10 ** (tx_power_dBm / 10.0)
-        k = 0.1
-        # Smooth PDR: decays with distance and load, but not insanely fast
+        k=0.1
         pdr = np.exp(-(alpha_d * distance + alpha_n * N_c)) * (1 - np.exp(-k * tx_power_linear))
 
         return pdr
 
     # ----------------------- DIAGNOSTIC -----------------------
-
     def get_average_allocated_power(self) -> float:
         """Average allocated power (dBm) across all managed users (for debugging)."""
         powers = []
@@ -307,5 +289,10 @@ class ControllerAgent:
                     if p is not None and np.isfinite(p):
                         powers.append(float(p))
         return float(np.mean(powers)) if powers else 0.0
+
+
+
+
+
 
 
